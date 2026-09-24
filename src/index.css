@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    background: #ffffff;
+    color: #0a1628;
+  }
+
+  body {
+    font-family: Inter, system-ui, 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  [data-remotion-player] {
+    height: 100%;
+    width: 100%;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply border border-white/60 bg-white/70 shadow-glass backdrop-blur-xl;
+  }
+
+  .glass-panel-strong {
+    @apply border border-white/70 bg-white/85 shadow-glass-lg backdrop-blur-2xl;
+  }
+
+  .glass-dark {
+    @apply border border-ink-950/10 bg-ink-950/[0.03] backdrop-blur-md;
+  }
+
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-full
+      font-medium transition-all duration-150 select-none
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vg-500 focus-visible:ring-offset-2
+      disabled:cursor-not-allowed disabled:opacity-45 active:enabled:scale-[0.98];
+  }
+
+  .btn-primary {
+    @apply btn bg-ink-950 px-5 py-2.5 text-sm text-white shadow-glass
+      hover:bg-vg-700 active:bg-vg-800;
+  }
+
+  .btn-glass {
+    @apply btn border border-white/70 bg-white/60 px-4 py-2 text-sm text-ink-900
+      shadow-glass backdrop-blur-md hover:bg-white/90 hover:text-ink-950;
+  }
+
+  .btn-ghost {
+    @apply btn px-3 py-1.5 text-sm text-ink-700 hover:bg-ink-950/5 hover:text-ink-950;
+  }
+
+  .btn-danger {
+    @apply btn border border-red-200 bg-red-50/80 px-4 py-2 text-sm text-red-700
+      backdrop-blur-md hover:bg-red-100;
+  }
+
+  .input {
+    @apply w-full rounded-2xl border border-ink-950/10 bg-white/80 px-3.5 py-2.5 text-sm
+      text-ink-950 shadow-glass backdrop-blur-md transition
+      placeholder:text-ink-400
+      focus:border-vg-500/40 focus:outline-none focus:ring-2 focus:ring-vg-500/30;
+  }
+
+  .field-label {
+    @apply mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-ink-500;
+  }
+
+  .card-error {
+    @apply rounded-2xl border border-red-200/80 bg-red-50/70 p-3.5 text-sm text-red-800
+      backdrop-blur-md shadow-glass;
+  }
+}
