@@ -99,7 +99,7 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
     <aside className="glass-panel flex h-full w-full flex-col gap-4 overflow-y-auto rounded-none border-y-0 border-l-0 p-4 lg:w-[360px] lg:rounded-r-none">
       <div className="flex items-center gap-3 rounded-2xl border border-white/60 bg-white/60 p-2.5 shadow-glass backdrop-blur-md">
         <img
-          src="/openvg-logo.jpeg"
+          src="/openvg-logo-triangular.jpeg"
           alt="Open VG"
           className="h-10 w-10 rounded-xl object-cover shadow-glass"
           width={40}
