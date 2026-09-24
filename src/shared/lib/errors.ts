@@ -12,17 +12,20 @@ export class ApiError extends Error {
 
 export function isFatalApiError(err: unknown): boolean {
   if (err instanceof ApiError) {
+    if (err.status === 0) return true; // network/proxy failure — retry won't help immediately
     if (err.status === 401 || err.status === 403 || err.status === 404) return true;
-    if (err.status === 400 && /api.?key|unauthorized|invalid.*key|permission/i.test(err.message)) {
+    if (err.status === 400 && /api.?key|unauthorized|invalid.*key|permission|API_KEY/i.test(err.message)) {
       return true;
     }
+    return false;
   }
   const msg = err instanceof Error ? err.message : String(err);
   return (
     /Falta la API key/i.test(msg) ||
     /Failed to fetch/i.test(msg) ||
     /NetworkError/i.test(msg) ||
-    /AbortError|timeout/i.test(msg)
+    /AbortError|timeout/i.test(msg) ||
+    /No se pudo conectar al proxy/i.test(msg)
   );
 }
 

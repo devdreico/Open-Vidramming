@@ -6,13 +6,24 @@ import { providerById, type ProviderDef } from './definitions';
 const FETCH_TIMEOUT_MS = 120_000;
 
 async function withTimeout(input: string, init: RequestInit): Promise<Response> {
+  if (typeof window === 'undefined') {
+    throw new ApiError('Entorno sin `window` (¿SSR?).', 0, '');
+  }
   const ctrl = new AbortController();
   const t = window.setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
     return await fetch(input, { ...init, signal: ctrl.signal });
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new ApiError('Tiempo de espera agotado (timeout).', 408, '');
+      throw new ApiError('Tiempo de espera agotado (timeout 120s).', 408, '');
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/Failed to fetch|NetworkError|load failed/i.test(msg)) {
+      throw new ApiError(
+        `No se pudo conectar al proxy de la API. ¿Está corriendo \`npm run dev\`? (${msg})`,
+        0,
+        '',
+      );
     }
     throw e;
   } finally {
@@ -24,13 +35,28 @@ async function readErrorMessage(res: Response, providerLabel: string): Promise<A
   const text = await res.text().catch(() => '');
   let message = text || `HTTP ${res.status}`;
   try {
-    const j = JSON.parse(text) as { error?: { message?: string } | string; message?: string };
+    const j = JSON.parse(text) as {
+      error?: { message?: string } | string;
+      message?: string;
+      type?: string;
+    };
     if (typeof j.error === 'string') message = j.error;
-    else if (j.error?.message) message = j.error.message;
+    else if (j.error && typeof j.error === 'object' && j.error.message) message = j.error.message;
     else if (j.message) message = j.message;
   } catch {
-    if (text.startsWith('<')) message = `Respuesta no válida del servidor (HTTP ${res.status}).`;
+    if (text.startsWith('<')) {
+      message = `Respuesta no válida del servidor (HTTP ${res.status}). ¿El proxy está configurado?`;
+    }
   }
+
+  if (res.status === 401 || res.status === 403) {
+    message = `API key inválida o sin permisos. ${message}`;
+  } else if (res.status === 429) {
+    message = `Límite de rate alcanzado. Inténtalo en unos segundos. ${message}`;
+  } else if (res.status === 404) {
+    message = `Ruta o modelo no encontrado (404). ${message}`;
+  }
+
   return new ApiError(`${providerLabel}: ${message}`, res.status, providerLabel);
 }
 
@@ -39,12 +65,16 @@ async function parseJson(res: Response, providerLabel: string): Promise<unknown>
   try {
     return await res.json();
   } catch {
-    throw new ApiError(`${providerLabel}: respuesta no es JSON válido.`, res.status, providerLabel);
+    throw new ApiError(
+      `${providerLabel}: la respuesta no es JSON válido (HTTP ${res.status}).`,
+      res.status,
+      providerLabel,
+    );
   }
 }
 
 function openaiBody(model: string, messages: LlmMessage[]) {
-  const isOSeries = /o1|o3|o4/i.test(model);
+  const isOSeries = /(^|[^a-z])(o1|o3|o4)/i.test(model);
   const bodyMessages = messages.map((m) => {
     if (typeof m.content === 'string') return { role: m.role, content: m.content };
     const parts = m.content.map((p) => {
@@ -65,24 +95,42 @@ function openaiBody(model: string, messages: LlmMessage[]) {
 
 function requireKey(p: ProviderDef): string {
   const key = getKey(p.id);
-  if (!key) throw new ApiError(`Falta la API key de ${p.label}. Ábrela en Ajustes.`, 401, p.label);
+  if (!key) {
+    throw new ApiError(
+      `Falta la API key de ${p.label}. Abre «Configurar API keys», pega la key y guarda.`,
+      401,
+      p.label,
+    );
+  }
   return key;
+}
+
+function authHeaders(p: ProviderDef, key: string): Record<string, string> {
+  const h: Record<string, string> = {};
+  if (p.protocol === 'anthropic') {
+    h['x-api-key'] = key;
+    h['anthropic-version'] = '2023-06-01';
+  } else if (p.protocol === 'gemini') {
+    h['x-goog-api-key'] = key;
+  } else {
+    h.Authorization = `Bearer ${key}`;
+    if (p.id === 'openrouter') {
+      h['HTTP-Referer'] = window.location.origin;
+      h['X-Title'] = 'Open VG';
+    }
+  }
+  return h;
 }
 
 async function chatOpenAi(p: ProviderDef, model: string, messages: LlmMessage[]): Promise<string> {
   const key = requireKey(p);
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${key}`,
-  };
-  if (p.id === 'openrouter') {
-    headers['HTTP-Referer'] = window.location.origin;
-    headers['X-Title'] = 'Open VG';
-  }
   const data = (await parseJson(
     await withTimeout(`/api/llm/${p.id}${p.chatPath}`, {
       method: 'POST',
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(p, key),
+      },
       body: JSON.stringify(openaiBody(model, messages)),
     }),
     p.label,
@@ -96,14 +144,18 @@ async function chatOpenAi(p: ProviderDef, model: string, messages: LlmMessage[])
       .join('');
     if (text) return text;
   }
-  throw new ApiError(`${p.label}: respuesta vacía del modelo.`, 200, p.label);
+  throw new ApiError(`${p.label}: el modelo devolvió una respuesta vacía.`, 200, p.label);
 }
 
 async function chatAnthropic(p: ProviderDef, model: string, messages: LlmMessage[]): Promise<string> {
   const key = requireKey(p);
   const system = messages
     .filter((m) => m.role === 'system')
-    .map((m) => (typeof m.content === 'string' ? m.content : m.content.map((c) => (c.type === 'text' ? c.text : '')).join('')))
+    .map((m) =>
+      typeof m.content === 'string'
+        ? m.content
+        : m.content.map((c) => (c.type === 'text' ? c.text : '')).join(''),
+    )
     .join('\n\n');
   const rest = messages.filter((m) => m.role !== 'system');
 
@@ -121,11 +173,7 @@ async function chatAnthropic(p: ProviderDef, model: string, messages: LlmMessage
             ? { type: 'text', text: c.text }
             : {
                 type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: c.mediaType,
-                  data: c.dataBase64,
-                },
+                source: { type: 'base64', media_type: c.mediaType, data: c.dataBase64 },
               },
         ),
       };
@@ -137,8 +185,7 @@ async function chatAnthropic(p: ProviderDef, model: string, messages: LlmMessage
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
+        ...authHeaders(p, key),
       },
       body: JSON.stringify(body),
     }),
@@ -183,7 +230,7 @@ async function chatGemini(p: ProviderDef, model: string, messages: LlmMessage[])
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': key,
+          ...authHeaders(p, key),
         },
         body: JSON.stringify({
           ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
@@ -213,7 +260,7 @@ async function chatCohere(p: ProviderDef, model: string, messages: LlmMessage[])
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
+        ...authHeaders(p, key),
       },
       body: JSON.stringify({
         model,
@@ -223,7 +270,10 @@ async function chatCohere(p: ProviderDef, model: string, messages: LlmMessage[])
           ...(system ? [{ role: 'system', content: system }] : []),
           ...rest.map((m) => ({
             role: m.role,
-            content: typeof m.content === 'string' ? m.content : m.content.map((c) => (c.type === 'text' ? c.text : '')).join(''),
+            content:
+              typeof m.content === 'string'
+                ? m.content
+                : m.content.map((c) => (c.type === 'text' ? c.text : '')).join(''),
           })),
         ],
       }),
@@ -231,8 +281,7 @@ async function chatCohere(p: ProviderDef, model: string, messages: LlmMessage[])
     p.label,
   )) as { message?: { content?: { text?: string }[] }; text?: string };
 
-  const text =
-    data.message?.content?.map((c) => c.text ?? '').join('') || data.text || '';
+  const text = data.message?.content?.map((c) => c.text ?? '').join('') || data.text || '';
   if (!text) throw new ApiError(`${p.label}: respuesta vacía del modelo.`, 200, p.label);
   return text;
 }
@@ -254,5 +303,95 @@ export async function chatCompletion(
       return chatCohere(p, model, messages);
     default:
       throw new Error(`Protocolo no soportado: ${String(p.protocol)}`);
+  }
+}
+
+/** Lightweight connectivity check: list models or hit a tiny endpoint. */
+export async function testConnection(providerId: string): Promise<{ ok: boolean; message: string }> {
+  const p = providerById(providerId);
+  const key = getKey(providerId);
+  if (!key) {
+    return { ok: false, message: `Sin API key para ${p.label}. Pégala en «Configurar API keys».` };
+  }
+
+  try {
+    if (p.protocol === 'gemini') {
+      const res = await withTimeout(`/api/llm/${p.id}/v1beta/models?maxResults=1`, {
+        method: 'GET',
+        headers: authHeaders(p, key),
+      });
+      if (res.ok) return { ok: true, message: `${p.label}: conexión correcta ✓` };
+      const err = await readErrorMessage(res, p.label);
+      return { ok: false, message: err.message };
+    }
+
+    if (p.protocol === 'anthropic') {
+      const res = await withTimeout(`/api/llm/${p.id}${p.modelsPath}`, {
+        method: 'GET',
+        headers: authHeaders(p, key),
+      });
+      if (res.ok) return { ok: true, message: `${p.label}: conexión correcta ✓` };
+      // Some accounts block /models — try a minimal messages call
+      if (res.status === 404 || res.status === 403) {
+        return await testMinimalChat(p, key);
+      }
+      const err = await readErrorMessage(res, p.label);
+      return { ok: false, message: err.message };
+    }
+
+    // openai-compatible / cohere: list models
+    const res = await withTimeout(`/api/llm/${p.id}${p.modelsPath}`, {
+      method: 'GET',
+      headers: authHeaders(p, key),
+    });
+    if (res.ok) return { ok: true, message: `${p.label}: conexión correcta ✓` };
+    if (res.status === 404) return await testMinimalChat(p, key);
+    const err = await readErrorMessage(res, p.label);
+    return { ok: false, message: err.message };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+async function testMinimalChat(p: ProviderDef, key: string): Promise<{ ok: boolean; message: string }> {
+  try {
+    let path = p.chatPath;
+    let body: string;
+    let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+    if (p.protocol === 'anthropic') {
+      headers = { ...headers, ...authHeaders(p, key) };
+      body = JSON.stringify({
+        model: p.defaultModel,
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'ping' }],
+      });
+    } else if (p.protocol === 'cohere') {
+      headers = { ...headers, ...authHeaders(p, key) };
+      body = JSON.stringify({
+        model: p.defaultModel,
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'ping' }],
+      });
+    } else {
+      headers = { ...headers, ...authHeaders(p, key) };
+      path = p.chatPath;
+      body = JSON.stringify({
+        model: p.defaultModel,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 16,
+      });
+    }
+
+    const res = await withTimeout(`/api/llm/${p.id}${path}`, {
+      method: 'POST',
+      headers,
+      body,
+    });
+    if (res.ok) return { ok: true, message: `${p.label}: conexión correcta ✓ (chat)` };
+    const err = await readErrorMessage(res, p.label);
+    return { ok: false, message: err.message };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e) };
   }
 }

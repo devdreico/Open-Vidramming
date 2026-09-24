@@ -2,7 +2,7 @@ import type { ProviderDef, ProviderModel } from './definitions';
 import { providerById } from './definitions';
 import { getKey } from './keys';
 
-const CACHE_KEY = 'openvg.modelCatalog.v1';
+const CACHE_KEY = 'openvg.modelCatalog.v2';
 const TTL_MS = 60 * 60 * 1000;
 
 interface CacheEntry {
@@ -10,15 +10,32 @@ interface CacheEntry {
   byProvider: Record<string, string[]>;
 }
 
-async function fetchWithKey(path: string, providerId: string, headers: Record<string, string>): Promise<unknown> {
-  const key = getKey(providerId);
+function authHeaders(p: ProviderDef, key: string): Record<string, string> {
+  if (p.protocol === 'anthropic') {
+    return { 'x-api-key': key, 'anthropic-version': '2023-06-01' };
+  }
+  if (p.protocol === 'gemini') {
+    return { 'x-goog-api-key': key };
+  }
+  if (p.id === 'openrouter') {
+    return {
+      Authorization: `Bearer ${key}`,
+      'HTTP-Referer': window.location.origin,
+      'X-Title': 'Open VG',
+    };
+  }
+  return { Authorization: `Bearer ${key}` };
+}
+
+async function fetchModels(p: ProviderDef): Promise<unknown> {
+  const key = getKey(p.id);
   if (!key) return null;
   const ctrl = new AbortController();
-  const t = window.setTimeout(() => ctrl.abort(), 15_000);
+  const t = window.setTimeout(() => ctrl.abort(), 20_000);
   try {
-    const res = await fetch(`/api/llm/${providerId}${path}`, {
+    const res = await fetch(`/api/llm/${p.id}${p.modelsPath}`, {
       method: 'GET',
-      headers: { ...headers, Authorization: `Bearer ${key}`, 'x-goog-api-key': key, 'x-api-key': key },
+      headers: { 'Content-Type': 'application/json', ...authHeaders(p, key) },
       signal: ctrl.signal,
     });
     if (!res.ok) return null;
@@ -33,11 +50,16 @@ async function fetchWithKey(path: string, providerId: string, headers: Record<st
 function extractIds(data: unknown, protocol: ProviderDef['protocol']): string[] {
   if (!data) return [];
   if (protocol === 'gemini') {
-    const j = data as { models?: { name?: string }[] };
+    const j = data as { models?: { name?: string; supportedGenerationMethods?: string[] }[] };
     return (j.models ?? [])
+      .filter(
+        (m) =>
+          !m.supportedGenerationMethods ||
+          m.supportedGenerationMethods.includes('generateContent'),
+      )
       .map((m) => (m.name ?? '').replace(/^models\//, ''))
-      .filter((x) => x && /flash|pro|gemini/i.test(x))
-      .slice(0, 40);
+      .filter((x) => x && /gemini|flash|pro/i.test(x))
+      .slice(0, 50);
   }
   if (protocol === 'anthropic') {
     const j = data as { data?: { id?: string }[] };
@@ -47,12 +69,14 @@ function extractIds(data: unknown, protocol: ProviderDef['protocol']): string[] 
     const j = data as { models?: { id?: string }[] };
     return (j.models ?? []).map((m) => m.id ?? '').filter(Boolean).slice(0, 40);
   }
-  // openai-compatible: { data: [{id}] } or { models: [{id, name}] }
-  const j = data as { data?: { id?: string }[]; models?: ({ id?: string; name?: string } | string)[] };
+  const j = data as {
+    data?: { id?: string }[];
+    models?: Array<{ id?: string; name?: string } | string>;
+  };
   const list = (j.data ?? j.models ?? []) as Array<{ id?: string; name?: string } | string>;
   return list
     .map((m) => (typeof m === 'string' ? m : (m.id ?? m.name ?? '')))
-    .filter((id) => id && !/whisper|tts|dall-e|embedding|moderation|audio/i.test(id))
+    .filter((id) => id && !/whisper|tts|dall-e|embedding|moderation|audio|realtime/i.test(id))
     .slice(0, 60);
 }
 
@@ -78,12 +102,7 @@ export async function refreshModelCatalog(providerId: string): Promise<string[] 
   const p = providerById(providerId);
   if (!p.supportsModelList || !getKey(providerId)) return null;
 
-  const headers: Record<string, string> =
-    p.protocol === 'anthropic'
-      ? { 'anthropic-version': '2023-06-01' }
-      : {};
-
-  const data = await fetchWithKey(p.modelsPath, providerId, headers);
+  const data = await fetchModels(p);
   const ids = extractIds(data, p.protocol);
   if (!ids.length) return null;
 
@@ -100,7 +119,10 @@ export function getCachedModels(providerId: string): string[] | null {
   return cache.byProvider[providerId] ?? null;
 }
 
-export function modelsForProvider(p: ProviderDef): { models: ProviderModel[]; source: 'api' | 'default' } {
+export function modelsForProvider(p: ProviderDef): {
+  models: ProviderModel[];
+  source: 'api' | 'default';
+} {
   const remote = getCachedModels(p.id);
   if (remote && remote.length) {
     const known = new Map(p.models.map((m) => [m.id, m.label]));
@@ -108,11 +130,10 @@ export function modelsForProvider(p: ProviderDef): { models: ProviderModel[]; so
       id,
       label: known.get(id) ?? id,
     }));
-    // keep preferred defaults at top
     for (const d of p.models) {
-      if (!merged.some((m) => m.id === d.id)) merged.unshift(d);
+      const idx = merged.findIndex((m) => m.id === d.id);
+      if (idx === -1) merged.unshift(d);
       else {
-        const idx = merged.findIndex((m) => m.id === d.id);
         const [item] = merged.splice(idx, 1);
         merged.unshift(item);
       }

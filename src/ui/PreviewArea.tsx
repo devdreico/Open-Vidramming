@@ -53,6 +53,13 @@ export function PreviewArea({ ctrl }: { ctrl: Ctrl }) {
     <main className="flex min-w-0 flex-1 flex-col bg-white">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-950/8 px-5 py-3">
         <div className="flex flex-wrap items-center gap-3">
+          <img
+            src="/openvg-logo.jpeg"
+            alt="Open VG"
+            className="h-9 w-9 rounded-xl object-cover shadow-glass ring-1 ring-ink-950/10"
+            width={36}
+            height={36}
+          />
           <span className="rounded-full bg-ink-950 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-white">
             Open VG
           </span>
