@@ -13,7 +13,14 @@
 | Agente | **OPENVG-AGENT** — oculto, solo badge + orquestación |
 | Archivos | Imágenes vision (PNG/JPEG/WebP) + texto/código indexables |
 | Modelos | Catálogo **automático** por API (fallback a defaults) |
-| Proveedores | 12 vía proxy Vite `/api/llm/:provider` |
+| Proveedores | 12 vía proxy Vite `/api/llm/:provider` (incl. **Google AI Studio**) |
+
+### Google AI Studio (Gemini)
+
+1. Crea una API key en [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+2. En la app: **Configurar API keys** → pega la key en **Google AI Studio (Gemini)**
+3. **Probar conexión API** → debe decir «conexión correcta ✓»
+4. El catálogo de modelos se carga automáticamente desde la API Gemini
 
 ## Stack
 

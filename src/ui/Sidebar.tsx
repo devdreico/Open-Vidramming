@@ -433,6 +433,16 @@ function KeysModal({
               autoComplete="off"
               spellCheck={false}
             />
+            {p.website && (
+              <a
+                href={p.website}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="mt-1 inline-block text-[11px] text-vg-600 underline-offset-2 hover:underline"
+              >
+                Obtener key en {new URL(p.website).hostname} ↗
+              </a>
+            )}
           </label>
         ))}
       </div>

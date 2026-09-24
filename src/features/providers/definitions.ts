@@ -16,6 +16,8 @@ export interface ProviderDef {
   defaultModel: string;
   /** base64 images in messages */
   supportsVision: boolean;
+  /** Optional docs URL shown in the keys modal */
+  website?: string;
 }
 
 export const PROVIDERS: ProviderDef[] = [
@@ -55,18 +57,22 @@ export const PROVIDERS: ProviderDef[] = [
   },
   {
     id: 'gemini',
-    label: 'Google Gemini',
-    keyHint: 'AIza...',
+    label: 'Google AI Studio (Gemini)',
+    keyHint: 'AIza… (aistudio.google.com/apikey)',
     protocol: 'gemini',
     chatPath: '',
     modelsPath: '/v1beta/models',
     supportsModelList: true,
     defaultModel: 'gemini-2.0-flash',
     supportsVision: true,
+    website: 'https://aistudio.google.com/apikey',
     models: [
       { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+      { id: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash-Lite' },
       { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
       { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+      { id: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
+      { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
     ],
   },
   {

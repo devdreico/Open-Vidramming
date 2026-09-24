@@ -50,6 +50,7 @@ async function fetchModels(p: ProviderDef): Promise<unknown> {
 function extractIds(data: unknown, protocol: ProviderDef['protocol']): string[] {
   if (!data) return [];
   if (protocol === 'gemini') {
+    // Google AI Studio / Gemini API — solo modelos de generación de texto/multimodal
     const j = data as { models?: { name?: string; supportedGenerationMethods?: string[] }[] };
     return (j.models ?? [])
       .filter(
@@ -58,7 +59,12 @@ function extractIds(data: unknown, protocol: ProviderDef['protocol']): string[] 
           m.supportedGenerationMethods.includes('generateContent'),
       )
       .map((m) => (m.name ?? '').replace(/^models\//, ''))
-      .filter((x) => x && /gemini|flash|pro/i.test(x))
+      .filter(
+        (x) =>
+          x &&
+          /gemini|flash|pro|learnlm/i.test(x) &&
+          !/embedding|aqa|image-?generation|imagen|veo|tts|audio/i.test(x),
+      )
       .slice(0, 50);
   }
   if (protocol === 'anthropic') {
