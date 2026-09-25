@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Player, type PlayerRef } from '@remotion/player';
 import type { useAppController } from '../state/useAppController';
 import type { ImageExportType } from '../shared/types';
 import { IMAGE_EXPORT_TYPES, ASPECT_RATIOS } from '../shared/types';
-import { useExport } from '../features/export/useExport';
 import { Button } from '../shared/ui/Button';
 import { Spinner } from '../shared/ui/Spinner';
 import { EmptyState } from '../shared/ui/EmptyState';
 import { ErrorBox } from '../shared/ui/ErrorBox';
 import { ProgressBar } from '../shared/ui/ProgressBar';
 import { AgentBadge } from '../shared/ui/AgentBadge';
+import { ErrorBoundary } from '../shared/ui/ErrorBoundary';
 
 type Ctrl = ReturnType<typeof useAppController>;
 
@@ -23,24 +23,23 @@ export function PreviewArea({ ctrl }: { ctrl: Ctrl }) {
     prefs,
     code,
     agentStatus,
-    setPlayerRef,
-    setPreviewSurface,
     setAspect,
+    cancelVidramming,
+    exporting,
+    progress,
+    runExport,
+    cancelExport,
   } = ctrl;
 
-  const playerHostRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const localPlayer = useRef<PlayerRef | null>(null);
-  const { exporting, progress, runExport } = useExport();
   const [imageType, setImageType] = useState<ImageExportType>('image/png');
 
-  useEffect(() => {
-    setPreviewSurface(surfaceRef.current);
-  }, [Scene, setPreviewSurface]);
-
-  useEffect(() => {
-    if (localPlayer.current) setPlayerRef(localPlayer.current);
-  }, [Scene, setPlayerRef]);
+  const busy = phase === 'generating';
+  // Solo la fase 'ready' renderiza el player: en 'error' no debe verse (ni
+  // exportarse) una composición vieja junto al mensaje de error.
+  const showPlayer = phase === 'ready' && !!Scene && !!meta;
+  const exportEnabled = phase === 'ready' && !!meta && !exporting && !busy;
 
   const doExport = useCallback(
     async (format: 'mp4' | ImageExportType) => {
@@ -79,6 +78,7 @@ export function PreviewArea({ ctrl }: { ctrl: Ctrl }) {
             onChange={(e) => setAspect(e.target.value as typeof prefs.aspect)}
             className="input w-auto rounded-full py-1.5 pl-3 pr-8 text-xs"
             aria-label="Proporción de visualización previa"
+            disabled={busy || exporting}
           >
             {ASPECT_RATIOS.map((a) => (
               <option key={a.id} value={a.id}>
@@ -92,7 +92,7 @@ export function PreviewArea({ ctrl }: { ctrl: Ctrl }) {
           <Button
             variant="primary"
             size="sm"
-            disabled={!meta || exporting}
+            disabled={!exportEnabled}
             onClick={() => void doExport('mp4')}
             title="Exportar video MP4 a 60 fps"
           >
@@ -104,7 +104,7 @@ export function PreviewArea({ ctrl }: { ctrl: Ctrl }) {
             onChange={(e) => setImageType(e.target.value as ImageExportType)}
             className="input w-auto rounded-full py-1.5 pl-3 pr-8 text-xs"
             aria-label="Formato de imagen"
-            disabled={!meta || exporting}
+            disabled={!exportEnabled}
           >
             {IMAGE_EXPORT_TYPES.map((t) => (
               <option key={t.id} value={t.id}>
@@ -116,7 +116,7 @@ export function PreviewArea({ ctrl }: { ctrl: Ctrl }) {
           <Button
             variant="glass"
             size="sm"
-            disabled={!meta || exporting}
+            disabled={!exportEnabled}
             onClick={() => void doExport(imageType)}
             title="Exportar frame actual como imagen"
           >
@@ -132,6 +132,9 @@ export function PreviewArea({ ctrl }: { ctrl: Ctrl }) {
             <p className="mt-3 text-xs text-ink-500">
               OPENVG-AGENT escribe una composición Remotion y la compila en el navegador.
             </p>
+            <Button variant="glass" size="sm" className="mt-4" onClick={cancelVidramming}>
+              Cancelar
+            </Button>
           </div>
         )}
 
@@ -144,54 +147,61 @@ export function PreviewArea({ ctrl }: { ctrl: Ctrl }) {
 
         {error && (phase === 'error' || (phase === 'ready' && !Scene)) && <ErrorBox>{error}</ErrorBox>}
 
-        {Scene && meta && phase !== 'generating' && (
+        {showPlayer && (
           <div
-            ref={playerHostRef}
             className="overflow-hidden rounded-3xl shadow-glass-lg ring-1 ring-ink-950/10"
             style={{
               width: 'min(100%, 900px)',
-              aspectRatio: `${meta.width} / ${meta.height}`,
+              aspectRatio: `${meta!.width} / ${meta!.height}`,
             }}
           >
             {/* Pure composition surface for export — controls sit outside via Player props */}
             <div ref={surfaceRef} className="h-full w-full overflow-hidden bg-black">
-              <Player
-                ref={(r: PlayerRef | null) => {
-                  localPlayer.current = r;
-                  if (r) setPlayerRef(r);
-                }}
-                component={Scene}
-                durationInFrames={meta.durationInFrames}
-                compositionWidth={meta.width}
-                compositionHeight={meta.height}
-                fps={meta.fps}
-                controls
-                loop
-                acknowledgeRemotionLicense
-                style={{ width: '100%', height: '100%' }}
-                inputProps={{}}
-              />
+              <ErrorBoundary resetKey={code}>
+                <Player
+                  ref={(r: PlayerRef | null) => {
+                    localPlayer.current = r;
+                  }}
+                  component={Scene!}
+                  durationInFrames={meta!.durationInFrames}
+                  compositionWidth={meta!.width}
+                  compositionHeight={meta!.height}
+                  fps={meta!.fps}
+                  controls
+                  loop
+                  acknowledgeRemotionLicense
+                  style={{ width: '100%', height: '100%' }}
+                  inputProps={{}}
+                />
+              </ErrorBoundary>
             </div>
           </div>
         )}
       </div>
 
       {(exporting || progress) && (
-        <div className="border-t border-ink-950/8 px-5 py-3">
-          <ProgressBar
-            value={
-              progress && progress.total > 0
-                ? Math.round((progress.current / progress.total) * 100)
-                : exporting
-                  ? 5
-                  : 100
-            }
-            label={
-              progress?.phase === 'error'
-                ? progress.message
-                : `${progress?.message ?? ''}${exporting ? ' — no cierres la pestaña.' : ''}`
-            }
-          />
+        <div className="flex items-center gap-3 border-t border-ink-950/8 px-5 py-3">
+          <div className="min-w-0 flex-1">
+            <ProgressBar
+              value={
+                progress && progress.total > 0
+                  ? Math.round((progress.current / progress.total) * 100)
+                  : exporting
+                    ? 5
+                    : 100
+              }
+              label={
+                progress?.phase === 'error'
+                  ? progress.message
+                  : `${progress?.message ?? ''}${exporting ? ' — no cierres la pestaña.' : ''}`
+              }
+            />
+          </div>
+          {exporting && (
+            <Button variant="glass" size="sm" onClick={cancelExport}>
+              Cancelar
+            </Button>
+          )}
         </div>
       )}
 

@@ -1,77 +1,8 @@
 import type { LlmMessage } from '../../shared/types';
 import { ApiError } from '../../shared/lib/errors';
+import { withTimeout, readJson, readErrorMessage } from '../../shared/lib/http';
 import { getKey } from './keys';
 import { providerById, type ProviderDef } from './definitions';
-
-const FETCH_TIMEOUT_MS = 120_000;
-
-async function withTimeout(input: string, init: RequestInit): Promise<Response> {
-  if (typeof window === 'undefined') {
-    throw new ApiError('Entorno sin `window` (¿SSR?).', 0, '');
-  }
-  const ctrl = new AbortController();
-  const t = window.setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-  try {
-    return await fetch(input, { ...init, signal: ctrl.signal });
-  } catch (e) {
-    if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new ApiError('Tiempo de espera agotado (timeout 120s).', 408, '');
-    }
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/Failed to fetch|NetworkError|load failed/i.test(msg)) {
-      throw new ApiError(
-        `No se pudo conectar al proxy de la API. ¿Está corriendo \`npm run dev\`? (${msg})`,
-        0,
-        '',
-      );
-    }
-    throw e;
-  } finally {
-    window.clearTimeout(t);
-  }
-}
-
-async function readErrorMessage(res: Response, providerLabel: string): Promise<ApiError> {
-  const text = await res.text().catch(() => '');
-  let message = text || `HTTP ${res.status}`;
-  try {
-    const j = JSON.parse(text) as {
-      error?: { message?: string } | string;
-      message?: string;
-      type?: string;
-    };
-    if (typeof j.error === 'string') message = j.error;
-    else if (j.error && typeof j.error === 'object' && j.error.message) message = j.error.message;
-    else if (j.message) message = j.message;
-  } catch {
-    if (text.startsWith('<')) {
-      message = `Respuesta no válida del servidor (HTTP ${res.status}). ¿El proxy está configurado?`;
-    }
-  }
-
-  if (res.status === 401 || res.status === 403) {
-    message = `API key inválida o sin permisos. ${message}`;
-  } else if (res.status === 429) {
-    message = `Límite de rate alcanzado. Inténtalo en unos segundos. ${message}`;
-  } else if (res.status === 404) {
-    message = `Ruta o modelo no encontrado (404). ${message}`;
-  }
-
-  return new ApiError(`${providerLabel}: ${message}`, res.status, providerLabel);
-}
-
-async function parseJson(res: Response, providerLabel: string): Promise<unknown> {
-  if (!res.ok) throw await readErrorMessage(res, providerLabel);
-  try {
-    return await res.json();
-  } catch {
-    throw new ApiError(
-      `${providerLabel}: la respuesta no es JSON válido (HTTP ${res.status}).`,
-      res.status,
-      providerLabel,
-    );
-  }
-}
 
 function openaiBody(model: string, messages: LlmMessage[]) {
   const isOSeries = /(^|[^a-z])(o1|o3|o4)/i.test(model);
@@ -122,9 +53,23 @@ function authHeaders(p: ProviderDef, key: string): Record<string, string> {
   return h;
 }
 
-async function chatOpenAi(p: ProviderDef, model: string, messages: LlmMessage[]): Promise<string> {
+/** Mensaje estándar cuando el modelo se queda sin tokens (reintentable). */
+function truncatedError(providerLabel: string, detail: string): ApiError {
+  return new ApiError(
+    `${providerLabel}: la respuesta se cortó por límite de tokens (${detail}). Reenvía SOLO el bloque tsx completo.`,
+    499,
+    providerLabel,
+  );
+}
+
+async function chatOpenAi(
+  p: ProviderDef,
+  model: string,
+  messages: LlmMessage[],
+  signal?: AbortSignal,
+): Promise<string> {
   const key = requireKey(p);
-  const data = (await parseJson(
+  const data = (await readJson(
     await withTimeout(`/api/llm/${p.id}${p.chatPath}`, {
       method: 'POST',
       headers: {
@@ -132,11 +77,17 @@ async function chatOpenAi(p: ProviderDef, model: string, messages: LlmMessage[])
         ...authHeaders(p, key),
       },
       body: JSON.stringify(openaiBody(model, messages)),
+      signal,
     }),
     p.label,
-  )) as { choices?: { message?: { content?: string | unknown } }[] };
+  )) as {
+    choices?: { finish_reason?: string | null; message?: { content?: string | unknown } }[];
+  };
 
-  const content = data.choices?.[0]?.message?.content;
+  const choice = data.choices?.[0];
+  if (choice?.finish_reason === 'length') throw truncatedError(p.label, 'finish_reason=length');
+
+  const content = choice?.message?.content;
   if (typeof content === 'string' && content) return content;
   if (Array.isArray(content)) {
     const text = content
@@ -147,7 +98,12 @@ async function chatOpenAi(p: ProviderDef, model: string, messages: LlmMessage[])
   throw new ApiError(`${p.label}: el modelo devolvió una respuesta vacía.`, 200, p.label);
 }
 
-async function chatAnthropic(p: ProviderDef, model: string, messages: LlmMessage[]): Promise<string> {
+async function chatAnthropic(
+  p: ProviderDef,
+  model: string,
+  messages: LlmMessage[],
+  signal?: AbortSignal,
+): Promise<string> {
   const key = requireKey(p);
   const system = messages
     .filter((m) => m.role === 'system')
@@ -180,7 +136,7 @@ async function chatAnthropic(p: ProviderDef, model: string, messages: LlmMessage
     }),
   };
 
-  const data = (await parseJson(
+  const data = (await readJson(
     await withTimeout(`/api/llm/${p.id}${p.chatPath}`, {
       method: 'POST',
       headers: {
@@ -188,9 +144,12 @@ async function chatAnthropic(p: ProviderDef, model: string, messages: LlmMessage
         ...authHeaders(p, key),
       },
       body: JSON.stringify(body),
+      signal,
     }),
     p.label,
-  )) as { content?: { type: string; text?: string }[] };
+  )) as { stop_reason?: string | null; content?: { type: string; text?: string }[] };
+
+  if (data.stop_reason === 'max_tokens') throw truncatedError(p.label, 'stop_reason=max_tokens');
 
   const text = data.content
     ?.filter((c) => c.type === 'text')
@@ -200,7 +159,12 @@ async function chatAnthropic(p: ProviderDef, model: string, messages: LlmMessage
   return text;
 }
 
-async function chatGemini(p: ProviderDef, model: string, messages: LlmMessage[]): Promise<string> {
+async function chatGemini(
+  p: ProviderDef,
+  model: string,
+  messages: LlmMessage[],
+  signal?: AbortSignal,
+): Promise<string> {
   const key = requireKey(p);
   const system = messages
     .filter((m) => m.role === 'system')
@@ -223,7 +187,7 @@ async function chatGemini(p: ProviderDef, model: string, messages: LlmMessage[])
     };
   });
 
-  const data = (await parseJson(
+  const data = (await readJson(
     await withTimeout(
       `/api/llm/${p.id}/v1beta/models/${encodeURIComponent(model)}:generateContent`,
       {
@@ -237,17 +201,33 @@ async function chatGemini(p: ProviderDef, model: string, messages: LlmMessage[])
           contents,
           generationConfig: { temperature: 0.4, maxOutputTokens: 8192 },
         }),
+        signal,
       },
     ),
     p.label,
-  )) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  )) as {
+    candidates?: {
+      finishReason?: string | null;
+      content?: { parts?: { text?: string }[] };
+    }[];
+  };
 
-  const text = data.candidates?.[0]?.content?.parts?.map((x) => x.text ?? '').join('');
+  const candidate = data.candidates?.[0];
+  if (candidate?.finishReason === 'MAX_TOKENS') {
+    throw truncatedError(p.label, 'finishReason=MAX_TOKENS');
+  }
+
+  const text = candidate?.content?.parts?.map((x) => x.text ?? '').join('');
   if (!text) throw new ApiError(`${p.label}: respuesta vacía del modelo.`, 200, p.label);
   return text;
 }
 
-async function chatCohere(p: ProviderDef, model: string, messages: LlmMessage[]): Promise<string> {
+async function chatCohere(
+  p: ProviderDef,
+  model: string,
+  messages: LlmMessage[],
+  signal?: AbortSignal,
+): Promise<string> {
   const key = requireKey(p);
   const system = messages
     .filter((m) => m.role === 'system')
@@ -255,7 +235,7 @@ async function chatCohere(p: ProviderDef, model: string, messages: LlmMessage[])
     .join('\n\n');
   const rest = messages.filter((m) => m.role !== 'system');
 
-  const data = (await parseJson(
+  const data = (await readJson(
     await withTimeout(`/api/llm/${p.id}${p.chatPath}`, {
       method: 'POST',
       headers: {
@@ -277,9 +257,16 @@ async function chatCohere(p: ProviderDef, model: string, messages: LlmMessage[])
           })),
         ],
       }),
+      signal,
     }),
     p.label,
-  )) as { message?: { content?: { text?: string }[] }; text?: string };
+  )) as {
+    finish_reason?: string | null;
+    message?: { content?: { text?: string }[] };
+    text?: string;
+  };
+
+  if (data.finish_reason === 'LENGTH') throw truncatedError(p.label, 'finish_reason=LENGTH');
 
   const text = data.message?.content?.map((c) => c.text ?? '').join('') || data.text || '';
   if (!text) throw new ApiError(`${p.label}: respuesta vacía del modelo.`, 200, p.label);
@@ -290,17 +277,18 @@ export async function chatCompletion(
   providerId: string,
   model: string,
   messages: LlmMessage[],
+  signal?: AbortSignal,
 ): Promise<string> {
   const p = providerById(providerId);
   switch (p.protocol) {
     case 'openai':
-      return chatOpenAi(p, model, messages);
+      return chatOpenAi(p, model, messages, signal);
     case 'anthropic':
-      return chatAnthropic(p, model, messages);
+      return chatAnthropic(p, model, messages, signal);
     case 'gemini':
-      return chatGemini(p, model, messages);
+      return chatGemini(p, model, messages, signal);
     case 'cohere':
-      return chatCohere(p, model, messages);
+      return chatCohere(p, model, messages, signal);
     default:
       throw new Error(`Protocolo no soportado: ${String(p.protocol)}`);
   }

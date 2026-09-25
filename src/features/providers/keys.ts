@@ -27,13 +27,22 @@ export function loadKeys(): KeyMap {
   }
 }
 
-export function saveKeys(keys: KeyMap): void {
+/**
+ * Persiste el mapa completo. Devuelve `false` si el navegador rechazó la
+ * escritura (cuota superada, modo privado…); el caller decide cómo avisar.
+ */
+export function saveKeys(keys: KeyMap): boolean {
   const cleaned: KeyMap = {};
   for (const [k, v] of Object.entries(keys)) {
     const t = (v ?? '').trim();
     if (t) cleaned[k] = t;
   }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function getKey(providerId: string): string {
@@ -44,11 +53,11 @@ export function hasKey(providerId: string): boolean {
   return getKey(providerId).length > 0;
 }
 
-/** Persist immediately (every keystroke / paste). */
-export function setKey(providerId: string, key: string): void {
+/** Persiste de inmediato (pegar/guardar una key). `false` = no se pudo guardar. */
+export function setKey(providerId: string, key: string): boolean {
   const keys = loadKeys();
   const trimmed = key.trim();
   if (trimmed) keys[providerId] = trimmed;
   else delete keys[providerId];
-  saveKeys(keys);
+  return saveKeys(keys);
 }

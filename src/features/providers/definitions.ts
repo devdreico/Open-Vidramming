@@ -1,7 +1,13 @@
 export interface ProviderModel {
   id: string;
   label: string;
+  /** El modelo acepta imágenes en entrada (según el registro models.dev). */
+  vision?: boolean;
 }
+
+/** Ids que no son de generación de texto (stt/tts/embeddings/imagen…). */
+export const NON_CHAT_MODEL_RE =
+  /whisper|tts|dall-e|embedding|moderation|realtime|transcribe|speech|audio|image|search|davinci-002/i;
 
 export interface ProviderDef {
   id: string;
@@ -18,6 +24,8 @@ export interface ProviderDef {
   supportsVision: boolean;
   /** Optional docs URL shown in the keys modal */
   website?: string;
+  /** Dónde crear la API key (wizard «Conectar proveedor») */
+  keyUrl?: string;
 }
 
 export const PROVIDERS: ProviderDef[] = [
@@ -30,6 +38,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1/models',
     supportsModelList: true,
     defaultModel: 'gpt-4o-mini',
+    keyUrl: 'https://platform.openai.com/api-keys',
     supportsVision: true,
     models: [
       { id: 'gpt-4o-mini', label: 'GPT-4o mini' },
@@ -47,6 +56,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1/models',
     supportsModelList: true,
     defaultModel: 'claude-sonnet-4-20250514',
+    keyUrl: 'https://console.anthropic.com/settings/keys',
     supportsVision: true,
     models: [
       { id: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
@@ -64,6 +74,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1beta/models',
     supportsModelList: true,
     defaultModel: 'gemini-2.0-flash',
+    keyUrl: 'https://aistudio.google.com/apikey',
     supportsVision: true,
     website: 'https://aistudio.google.com/apikey',
     models: [
@@ -84,6 +95,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1/models',
     supportsModelList: true,
     defaultModel: 'deepseek-chat',
+    keyUrl: 'https://platform.deepseek.com/api_keys',
     supportsVision: false,
     models: [
       { id: 'deepseek-chat', label: 'DeepSeek Chat (V3)' },
@@ -99,6 +111,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1/models',
     supportsModelList: true,
     defaultModel: 'grok-3-mini',
+    keyUrl: 'https://console.x.ai/',
     supportsVision: true,
     models: [
       { id: 'grok-3-mini', label: 'Grok 3 Mini' },
@@ -115,6 +128,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1/models',
     supportsModelList: true,
     defaultModel: 'mistral-small-latest',
+    keyUrl: 'https://console.mistral.ai/api-keys',
     supportsVision: true,
     models: [
       { id: 'mistral-small-latest', label: 'Mistral Small' },
@@ -131,6 +145,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1/models',
     supportsModelList: true,
     defaultModel: 'command-r-plus',
+    keyUrl: 'https://dashboard.cohere.com/api-keys',
     supportsVision: false,
     models: [
       { id: 'command-r-plus', label: 'Command R+' },
@@ -147,6 +162,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/openai/v1/models',
     supportsModelList: true,
     defaultModel: 'llama-3.3-70b-versatile',
+    keyUrl: 'https://console.groq.com/keys',
     supportsVision: true,
     models: [
       { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B' },
@@ -162,6 +178,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1/models',
     supportsModelList: true,
     defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    keyUrl: 'https://api.together.xyz/settings/api-keys',
     supportsVision: false,
     models: [
       { id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', label: 'Llama 3.3 70B Turbo' },
@@ -177,6 +194,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/v1/models',
     supportsModelList: true,
     defaultModel: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+    keyUrl: 'https://fireworks.ai/api-keys',
     supportsVision: false,
     models: [
       { id: 'accounts/fireworks/models/llama-v3p3-70b-instruct', label: 'Llama 3.3 70B' },
@@ -192,6 +210,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/models',
     supportsModelList: false,
     defaultModel: 'sonar',
+    keyUrl: 'https://www.perplexity.ai/settings/api',
     supportsVision: false,
     models: [
       { id: 'sonar', label: 'Sonar' },
@@ -207,6 +226,7 @@ export const PROVIDERS: ProviderDef[] = [
     modelsPath: '/api/v1/models',
     supportsModelList: true,
     defaultModel: 'openai/gpt-4o-mini',
+    keyUrl: 'https://openrouter.ai/settings/keys',
     supportsVision: true,
     models: [
       { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini' },

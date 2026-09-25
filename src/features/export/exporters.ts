@@ -1,41 +1,98 @@
-import { toPng } from 'html-to-image';
+import { toBlob } from 'html-to-image';
 import type { PlayerRef } from '@remotion/player';
 import type { CompositionMeta, ExportProgress, ImageExportType } from '../../shared/types';
+import { CancelledError, isCancelled, toErrorMessage } from '../../shared/lib/errors';
+import coreJsUrl from '@ffmpeg/core?url';
+import coreWasmUrl from '@ffmpeg/core/wasm?url';
 
 export type ProgressFn = (p: ExportProgress) => void;
 
-function seekTo(player: PlayerRef, frame: number): Promise<void> {
-  return new Promise((resolve) => {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new CancelledError('Exportación cancelada.');
+}
+
+/**
+ * Lleva el player al `frame` esperando a que el DOM se pinte de verdad.
+ * - No depende solo de doble `requestAnimationFrame` (se congela con la pestaña
+ *   en background): hay sondeo sobre `getCurrentFrame()` + watchdog de 2 s.
+ * - Cancelable: un `abort` rechaza y no deja el bucle de export colgado.
+ */
+function seekTo(player: PlayerRef, frame: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new CancelledError('Exportación cancelada.'));
+      return;
+    }
     let done = false;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      player.removeEventListener('frameupdate', onFrame);
+      if (pollTimer !== undefined) clearTimeout(pollTimer);
+      if (settleTimer !== undefined) clearTimeout(settleTimer);
+      signal?.removeEventListener('abort', onAbort);
+    };
     const finish = () => {
       if (done) return;
       done = true;
-      player.removeEventListener('frameupdate', onFrame);
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      cleanup();
+      resolve();
+    };
+    const fail = (err: unknown) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(err);
+    };
+    const onAbort = () => fail(new CancelledError('Exportación cancelada.'));
+    const scheduleFinish = () => {
+      if (done || settleTimer !== undefined) return;
+      // Un frame de margen para que React/Remotion repinte antes de capturar.
+      settleTimer = setTimeout(finish, 50);
     };
     const onFrame = (e: { detail: { frame: number } }) => {
-      if (e.detail.frame === frame) finish();
+      if (e.detail.frame === frame) scheduleFinish();
     };
+    const deadline = performance.now() + 2_000;
+    const poll = () => {
+      if (done) return;
+      if (player.getCurrentFrame() === frame) {
+        scheduleFinish();
+        return;
+      }
+      if (performance.now() > deadline) {
+        finish();
+        return;
+      }
+      pollTimer = setTimeout(poll, 16);
+    };
+
     player.addEventListener('frameupdate', onFrame);
+    signal?.addEventListener('abort', onAbort, { once: true });
     player.seekTo(frame);
-    setTimeout(finish, 200);
+    pollTimer = setTimeout(poll, 16);
   });
 }
 
-/** Capture the pure composition area (no player controls) into a data URL at export resolution. */
+/** Captura el área pura de la composición (sin controles del player) como Blob. */
 async function captureFrame(
   player: PlayerRef,
   surface: HTMLElement,
   frame: number,
   meta: CompositionMeta,
-): Promise<string> {
-  await seekTo(player, frame);
-  return toPng(surface, {
+  signal?: AbortSignal,
+): Promise<Blob> {
+  await seekTo(player, frame, signal);
+  throwIfAborted(signal);
+  const blob = await toBlob(surface, {
     width: meta.width,
     height: meta.height,
     pixelRatio: 1,
     cacheBust: false,
   });
+  if (!blob) throw new Error('No se pudo capturar el frame (toBlob devolvió null).');
+  return blob;
 }
 
 export async function exportStillImage(
@@ -45,28 +102,27 @@ export async function exportStillImage(
   mime: ImageExportType,
   onProgress?: ProgressFn,
   frame?: number,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   const targetFrame = frame ?? Math.max(0, player.getCurrentFrame());
+  const fmt = mime === 'image/png' ? 'image-png' : mime === 'image/jpeg' ? 'image-jpeg' : 'image-webp';
   onProgress?.({
-    format: mime === 'image/png' ? 'image-png' : mime === 'image/jpeg' ? 'image-jpeg' : 'image-webp',
+    format: fmt,
     phase: 'captura',
     current: 1,
     total: 1,
     message: `Capturando frame ${targetFrame}…`,
   });
-  const wasPlaying = false;
+  const wasPlaying = player.isPlaying();
   player.pause();
-  const dataUrl = await captureFrame(player, surface, targetFrame, meta);
-  if (wasPlaying) player.play();
-  const blob = await (await fetch(dataUrl)).blob();
-  const typed = await convertBlob(blob, mime);
-  onProgress?.({
-    format: mime === 'image/png' ? 'image-png' : mime === 'image/jpeg' ? 'image-jpeg' : 'image-webp',
-    phase: 'listo',
-    current: 1,
-    total: 1,
-  });
-  return typed;
+  try {
+    const blob = await captureFrame(player, surface, targetFrame, meta, signal);
+    const typed = await convertBlob(blob, mime);
+    onProgress?.({ format: fmt, phase: 'listo', current: 1, total: 1 });
+    return typed;
+  } finally {
+    if (wasPlaying) player.play();
+  }
 }
 
 async function convertBlob(blob: Blob, mime: ImageExportType): Promise<Blob> {
@@ -89,102 +145,161 @@ async function convertBlob(blob: Blob, mime: ImageExportType): Promise<Blob> {
   });
 }
 
+/** ffmpeg.wasm primero: si no hay núcleo no tiene sentido capturar cientos de frames. */
+async function loadFFmpeg() {
+  const { FFmpeg } = await import('@ffmpeg/ffmpeg');
+  const { toBlobURL } = await import('@ffmpeg/util');
+  const ffmpeg = new FFmpeg();
+  const sources = [
+    { coreURL: coreJsUrl, wasmURL: coreWasmUrl },
+    {
+      coreURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.js',
+      wasmURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm',
+    },
+  ];
+  let lastError: unknown;
+  for (const src of sources) {
+    try {
+      await ffmpeg.load({
+        coreURL: await toBlobURL(src.coreURL, 'text/javascript'),
+        wasmURL: await toBlobURL(src.wasmURL, 'application/wasm'),
+      });
+      return ffmpeg;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  try {
+    ffmpeg.terminate();
+  } catch {
+    /* el load ni siquiera arrancó */
+  }
+  throw new Error(
+    `No se pudo cargar ffmpeg.wasm (ni local ni por CDN): ${toErrorMessage(lastError)}`,
+  );
+}
+
 export async function exportMp4(
   player: PlayerRef,
   surface: HTMLElement,
   meta: CompositionMeta,
   onProgress?: ProgressFn,
+  signal?: AbortSignal,
 ): Promise<Blob> {
+  throwIfAborted(signal);
   player.pause();
-  const urls: string[] = [];
-  const total = meta.durationInFrames;
 
-  for (let frame = 0; frame < total; frame++) {
+  if (document.visibilityState === 'hidden') {
     onProgress?.({
       format: 'mp4',
       phase: 'captura',
-      current: frame + 1,
-      total,
-      message: `Capturando frame ${frame + 1}/${total}`,
+      current: 0,
+      total: meta.durationInFrames * 2,
+      message:
+        'La pestaña está en segundo plano: manténla visible para que los frames se rendericen.',
     });
-    urls.push(await captureFrame(player, surface, frame, meta));
   }
 
   onProgress?.({
     format: 'mp4',
     phase: 'codificando',
     current: 0,
-    total: 100,
+    total: meta.durationInFrames * 2,
     message: 'Cargando ffmpeg.wasm…',
   });
+  const ffmpeg = await loadFFmpeg();
 
-  const { FFmpeg } = await import('@ffmpeg/ffmpeg');
-  const { fetchFile, toBlobURL } = await import('@ffmpeg/util');
-  const ffmpeg = new FFmpeg();
-  const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
-  await ffmpeg.load({
-    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
-    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
-  });
-
-  ffmpeg.on('progress', ({ progress }: { progress: number }) => {
-    const pct = Math.min(100, Math.max(0, Math.round(progress * 100)));
-    onProgress?.({
-      format: 'mp4',
-      phase: 'codificando',
-      current: pct,
-      total: 100,
-      message: `Codificando MP4 60fps… ${pct}%`,
-    });
-  });
-
-  const pad = Math.max(5, String(total).length);
-  for (let i = 0; i < urls.length; i++) {
-    const name = `frame_${String(i).padStart(pad, '0')}.png`;
-    await ffmpeg.writeFile(name, await fetchFile(urls[i]));
-    if (i % 15 === 0 || i === urls.length - 1) {
+  try {
+    ffmpeg.on('progress', ({ progress }: { progress: number }) => {
+      const pct = Math.min(100, Math.max(0, Math.round(progress * 100)));
+      const done = meta.durationInFrames + Math.round((pct / 100) * meta.durationInFrames);
       onProgress?.({
         format: 'mp4',
         phase: 'codificando',
-        current: Math.round((i / Math.max(1, urls.length)) * 50),
-        total: 100,
-        message: `Preparando frames ${i + 1}/${urls.length}`,
+        current: done,
+        total: meta.durationInFrames * 2,
+        message: `Codificando MP4 60fps… ${pct}%`,
       });
-      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const total = meta.durationInFrames;
+    const pad = Math.max(5, String(total).length);
+    const nameOf = (i: number) => `frame_${String(i).padStart(pad, '0')}.png`;
+
+    // Captura → FS de ffmpeg frame a frame: nunca acumulamos cientos de data-URLs en RAM.
+    for (let frame = 0; frame < total; frame++) {
+      throwIfAborted(signal);
+      onProgress?.({
+        format: 'mp4',
+        phase: 'captura',
+        current: frame + 1,
+        total: total * 2,
+        message: `Capturando frame ${frame + 1}/${total}`,
+      });
+      const blob = await captureFrame(player, surface, frame, meta, signal);
+      await ffmpeg.writeFile(nameOf(frame), new Uint8Array(await blob.arrayBuffer()));
+      if (frame % 15 === 0) {
+        onProgress?.({
+          format: 'mp4',
+          phase: 'captura',
+          current: frame + 1,
+          total: total * 2,
+          message: `Capturando frame ${frame + 1}/${total}`,
+        });
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+
+    throwIfAborted(signal);
+    onProgress?.({
+      format: 'mp4',
+      phase: 'codificando',
+      current: total,
+      total: total * 2,
+      message: 'Codificando MP4 60fps…',
+    });
+
+    const code = await ffmpeg.exec([
+      '-y',
+      '-framerate',
+      String(meta.fps),
+      '-i',
+      `frame_%0${pad}d.png`,
+      '-c:v',
+      'libx264',
+      '-preset',
+      'medium',
+      '-crf',
+      '18',
+      '-pix_fmt',
+      'yuv420p',
+      'out.mp4',
+    ]);
+    if (code !== 0) throw new Error(`ffmpeg falló con código ${code}.`);
+
+    const data = (await ffmpeg.readFile('out.mp4')) as Uint8Array;
+    const copy = new Uint8Array(data.byteLength);
+    copy.set(data);
+
+    onProgress?.({
+      format: 'mp4',
+      phase: 'listo',
+      current: total * 2,
+      total: total * 2,
+      message: 'MP4 listo',
+    });
+    return new Blob([copy], { type: 'video/mp4' });
+  } catch (e) {
+    if (isCancelled(e)) throw e instanceof CancelledError ? e : new CancelledError('Exportación cancelada.');
+    throw e;
+  } finally {
+    // Libera el worker + la memoria WASM (FS incluida) en todos los caminos.
+    try {
+      ffmpeg.terminate();
+    } catch {
+      /* ya estaba terminado */
     }
   }
-
-  const code = await ffmpeg.exec([
-    '-y',
-    '-framerate',
-    String(meta.fps),
-    '-i',
-    `frame_%0${pad}d.png`,
-    '-c:v',
-    'libx264',
-    '-preset',
-    'medium',
-    '-crf',
-    '18',
-    '-pix_fmt',
-    'yuv420p',
-    'out.mp4',
-  ]);
-
-  if (code !== 0) {
-    throw new Error(`ffmpeg falló con código ${code}.`);
-  }
-
-  const data = (await ffmpeg.readFile('out.mp4')) as Uint8Array;
-  for (let i = 0; i < urls.length; i++) {
-    await ffmpeg.deleteFile(`frame_${String(i).padStart(pad, '0')}.png`).catch(() => undefined);
-  }
-  await ffmpeg.deleteFile('out.mp4').catch(() => undefined);
-
-  onProgress?.({ format: 'mp4', phase: 'listo', current: 100, total: 100, message: 'MP4 listo' });
-  const copy = new Uint8Array(data.byteLength);
-  copy.set(data);
-  return new Blob([copy], { type: 'video/mp4' });
 }
 
 export function downloadBlob(blob: Blob, filename: string): void {

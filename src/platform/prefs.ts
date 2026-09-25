@@ -30,5 +30,10 @@ export function loadPrefs(): Prefs {
 }
 
 export function savePrefs(p: Prefs): void {
-  localStorage.setItem(PREF_KEY, JSON.stringify(p));
+  try {
+    localStorage.setItem(PREF_KEY, JSON.stringify(p));
+  } catch {
+    // localStorage puede fallar (cuota, modo privado): la app sigue funcionando
+    // sin persistir; nunca debe reventar un updater de React.
+  }
 }

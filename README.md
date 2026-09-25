@@ -12,7 +12,7 @@
 | UI | Fondo **blanco puro**, glassmorphism, botones `rounded-full` |
 | Agente | **OPENVG-AGENT** — oculto, solo badge + orquestación |
 | Archivos | Imágenes vision (PNG/JPEG/WebP) + texto/código indexables |
-| Modelos | Catálogo **automático** por API (fallback a defaults) |
+| Modelos | Catálogo **automático** por API → fallback **models.dev** → defaults |
 | Proveedores | 12 vía proxy Vite `/api/llm/:provider` (incl. **Google AI Studio**) |
 
 ### Google AI Studio (Gemini)
@@ -33,10 +33,30 @@ npm install
 npm run dev
 ```
 
-1. **Configurar API keys…** — pega keys (localStorage).
+1. **Conectar proveedor…** — wizard en 3 pasos (proveedor → API key → modelo). Las keys se guardan en `localStorage`.
 2. Prompt + archivos + proporción/duración.
 3. **VIDRAMMING** → preview.
 4. Export **MP4 ↓ 60fps** o **Imagen ↓** (PNG/JPEG/WebP).
+
+## Catálogo de modelos
+
+Orden de fuentes, por proveedor:
+
+1. **API del proveedor** — `GET /models` con tu key (catálogo real de tu cuenta). Se refresca al montar, al cambiar de proveedor, al guardar/borrar una key, al probar la conexión y con **↻**.
+2. **models.dev** — registro público (`https://models.dev/api.json`, CORS `*`) usado cuando no hay key o el `/models` falla; solo se persiste el subconjunto de nuestros 12 proveedores (`openvg.modelsDev.v1`, TTL 7 días).
+3. **Defaults locales** — la lista embebida de `definitions.ts`.
+
+El cache del `/models` es **por proveedor** (`openvg.modelCatalog.v3`, TTL 1 h) con *stale-while-revalidate*: los datos vencidos se siguen mostrando y el fallo se deja visible (badge `⚠` + **Reintentar**) en vez de ocultarse. La fuente activa se muestra en el campo Modelo (`vía API` / `models.dev` / `lista local`).
+
+## Conexión (estilo `/connect`)
+
+**Conectar proveedor…** abre un wizard de 3 pasos equivalente al `/connect` de opencode:
+
+1. **Proveedor** — buscador + estado (`Conectado ✓` / `Sin key`) y nº de modelos.
+2. **API key** — enlace para crear la key, input con mostrar/ocultar, **Probar conexión** (usa `testConnection`) y **Guardar**. Borrar la key limpia también su catálogo cacheado.
+3. **Modelo** — buscador con badge de origen, `visión` (modelos multimodales según models.dev) y selección del modelo a usar.
+
+> OAuth / device-flow (Claude Pro, Copilot…) no es factible en una SPA sin backend (CORS + client secret): se cubre con enlace a la consola del proveedor + key manual.
 
 ## Scripts
 
@@ -45,6 +65,9 @@ npm run dev
 | `npm run dev` | Dev server |
 | `npm run build` | `tsc -b && vite build` |
 | `npm run typecheck` | Typecheck |
+| `npm run lint` | ESLint (`eslint .`) |
+| `npm run test` | Vitest (7 archivos, 54 tests) |
+| `npm run check` | typecheck + lint + test + build (todo en verde) |
 
 ## Estructura
 
@@ -55,13 +78,13 @@ src/
   features/
     agent/      # OPENVG-AGENT runVidramming + skills en prompt
     generator/  # aspect, prompt, sandbox
-    providers/  # 12 defs, chat, keys, modelCatalog
+    providers/  # 12 defs, chat, keys, modelCatalog, modelsDev, useModelCatalog
     assets/     # indexación vision+texto
     export/     # MP4 60 + stills + useExport
     history/    # IndexedDB
   platform/   # prefs
   state/      # useAppController
-  ui/         # Sidebar, PreviewArea
+  ui/         # Sidebar, PreviewArea, ConnectModal
 ```
 
 ## Notas
@@ -69,3 +92,5 @@ src/
 - Proxy de API solo en **dev** (`vite.config.ts`); producción necesita backend.
 - Licencia Remotion: `acknowledgeRemotionLicense` en Player.
 - Sandbox bloquea `fetch`, storage, eval, timers, `Math.random`, imports fuera de `react`/`remotion`.
+- **Deuda pendiente (C1)**: la validación del código del modelo sigue con *blacklist* en el **hilo principal** (esbuild sincrónico); el aislamiento real en Worker queda para una fase posterior.
+- Cancelación: **Cancelar generación** (preview) y **Cancelar export** abortan vía `AbortController`; el 429 respeta `Retry-After` y los errores transitorios hacen backoff (máx. 3 intentos).

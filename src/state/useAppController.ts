@@ -1,5 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
-import type { PlayerRef } from '@remotion/player';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AspectRatioId,
   AssetFile,
@@ -11,8 +10,9 @@ import { runVidramming } from '../features/agent/runVidramming';
 import { PROVIDERS, providerById } from '../features/providers/definitions';
 import { compileComposition } from '../features/generator/sandbox';
 import { deleteGeneration, listGenerations, newId, saveGeneration } from '../features/history/history';
+import { isCancelled, toErrorMessage } from '../shared/lib/errors';
+import { useExport } from '../features/export/useExport';
 import { loadPrefs, savePrefs, type Prefs } from '../platform/prefs';
-import { refreshModelCatalog } from '../features/providers/modelCatalog';
 
 export type AppPhase = 'idle' | 'generating' | 'ready' | 'error';
 
@@ -28,19 +28,30 @@ export function useAppController() {
   const [Scene, setScene] = useState<React.ComponentType | null>(null);
   const [history, setHistory] = useState<GenerationRecord[]>([]);
   const [assets, setAssets] = useState<AssetFile[]>([]);
-  const [playerRef, setPlayerRef] = useState<PlayerRef | null>(null);
-  const [previewSurface, setPreviewSurface] = useState<HTMLElement | null>(null);
+
+  // La exportación vive aquí (y no en PreviewArea) para poder bloquear el resto
+  // de la UI: generar o cambiar la proporción a mitad de MP4 rompe los frames.
+  const { exporting, progress, runExport, cancelExport } = useExport();
+
+  const busyRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const exportingRef = useRef(exporting);
+  const sceneRef = useRef(false);
+  exportingRef.current = exporting;
+  sceneRef.current = !!Scene;
+
+  // Persistencia como efecto normal (nunca dentro de un updater de setState).
+  useEffect(() => {
+    savePrefs(prefs);
+  }, [prefs]);
 
   const setPrefs = useCallback((patch: Partial<Prefs>) => {
-    setPrefsState((prev: Prefs) => {
-      const next: Prefs = { ...prev, ...patch };
-      savePrefs(next);
-      return next;
-    });
+    setPrefsState((prev: Prefs) => ({ ...prev, ...patch }));
   }, []);
 
   const setAspect = useCallback(
     (aspect: AspectRatioId) => {
+      if (busyRef.current || exportingRef.current) return;
       setPrefs({ aspect });
       const a = { '1:1': [1080, 1080], '16:9': [1920, 1080], '9:16': [1080, 1920], '4:5': [1080, 1350] } as const;
       const [w, h] = a[aspect];
@@ -75,15 +86,19 @@ export function useAppController() {
     }
   }, [prefs.providerId]);
 
-  const refreshModels = useCallback(async () => {
-    await refreshModelCatalog(prefs.providerId);
-  }, [prefs.providerId]);
-
   const vidramming = useCallback(async () => {
+    // Guarda de re-entrancia: un doble clic (o generar mientras exporta) no debe
+    // disparar dos corridas compitiendo por code/meta/Scene.
+    if (busyRef.current || exportingRef.current) return;
+    busyRef.current = true;
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setPhase('generating');
     setError('');
     setAgentStatus('preparando skills');
     setStatus('OPENVG-AGENT · indexando archivos y skills…');
+
     try {
       const req: GenerateRequest = {
         prompt,
@@ -93,7 +108,7 @@ export function useAppController() {
         model: prefs.model,
       };
       setAgentStatus('generando');
-      const result = await runVidramming(req, assets, setStatus);
+      const result = await runVidramming(req, assets, setStatus, controller.signal);
       setCode(result.code);
       setMeta(result.meta);
       setScene(() => result.Scene);
@@ -113,31 +128,54 @@ export function useAppController() {
         meta: result.meta,
         assetNames: result.assetNames,
       };
-      await saveGeneration(rec);
-      await refreshHistory();
+      // Guardar en el historial NO debe convertir en error una generación válida:
+      // si IndexedDB falla (modo privado/cuota) solo se avisa.
+      try {
+        await saveGeneration(rec);
+        await refreshHistory();
+      } catch (saveErr) {
+        setStatus(
+          (s) => `${s} Aviso: no se pudo guardar en el historial (${toErrorMessage(saveErr)}).`,
+        );
+      }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
-      setPhase('error');
-      setAgentStatus('error');
-      setStatus('');
+      if (isCancelled(e)) {
+        setPhase(sceneRef.current ? 'ready' : 'idle');
+        setAgentStatus('listo');
+        setStatus('Generación cancelada.');
+      } else {
+        setError(toErrorMessage(e));
+        setPhase('error');
+        setAgentStatus('error');
+        setStatus('');
+      }
+    } finally {
+      busyRef.current = false;
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }, [prompt, prefs, assets, refreshHistory]);
 
+  const cancelVidramming = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
   const loadRecord = useCallback(
     (rec: GenerationRecord) => {
+      if (busyRef.current || exportingRef.current) return;
       setPrompt(rec.prompt);
       setCode(rec.code);
       setPhase('ready');
       setError('');
+      setAgentStatus('listo');
       setStatus('Composición cargada del historial.');
       try {
         const compiled = compileComposition(rec.code, rec.meta);
         setScene(() => compiled.Scene);
-        setMeta({ ...compiled.meta, fps: 60 });
+        setMeta(rec.meta);
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(toErrorMessage(e));
         setScene(null);
+        setMeta(null);
         setPhase('error');
       }
       setPrefs({
@@ -152,6 +190,7 @@ export function useAppController() {
 
   const removeRecord = useCallback(
     async (id: string) => {
+      if (busyRef.current || exportingRef.current) return;
       await deleteGeneration(id);
       await refreshHistory();
     },
@@ -174,6 +213,7 @@ export function useAppController() {
     meta,
     Scene,
     vidramming,
+    cancelVidramming,
     history,
     refreshHistory,
     loadRecord,
@@ -182,10 +222,9 @@ export function useAppController() {
     addAssets,
     removeAsset,
     clearAssets,
-    playerRef,
-    setPlayerRef,
-    previewSurface,
-    setPreviewSurface,
-    refreshModels,
+    exporting,
+    progress,
+    runExport,
+    cancelExport,
   };
 }

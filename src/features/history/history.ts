@@ -23,15 +23,31 @@ function tx<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBReque
   return openDb().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
-        const t = db.transaction(STORE, mode);
-        const req = fn(t.objectStore(STORE));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error ?? new Error('Error IndexedDB'));
-        t.oncomplete = () => db.close();
-        t.onerror = () => {
-          reject(t.error ?? new Error('Transacción fallida'));
+        try {
+          const t = db.transaction(STORE, mode);
+          const req = fn(t.objectStore(STORE));
+          let result!: T;
+          req.onsuccess = () => {
+            result = req.result;
+          };
+          // Se confirma en `oncomplete` (no en `onsuccess`): un commit abortado
+          // no debe reportarse como guardado, y `onabort` tampoco se cuelga.
+          t.oncomplete = () => {
+            db.close();
+            resolve(result);
+          };
+          t.onerror = () => {
+            db.close();
+            reject(t.error ?? new Error('Transacción fallida'));
+          };
+          t.onabort = () => {
+            db.close();
+            reject(t.error ?? new Error('Transacción abortada'));
+          };
+        } catch (e) {
           db.close();
-        };
+          reject(e);
+        }
       }),
   );
 }

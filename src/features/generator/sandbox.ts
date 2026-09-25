@@ -31,6 +31,9 @@ export interface CompiledComposition {
 export function extractCodeBlock(raw: string): string {
   const fenced = raw.match(/```(?:tsx|typescript|ts|jsx|javascript|js)?\s*([\s\S]*?)```/i);
   if (fenced?.[1]) return fenced[1].trim();
+  // Respuesta truncada: fence abierto sin cerrar → toma todo lo que hay.
+  const opened = raw.match(/```(?:tsx|typescript|ts|jsx|javascript|js)?\s*([\s\S]*)$/i);
+  if (opened?.[1]) return opened[1].trim();
   return raw.trim();
 }
 
@@ -57,31 +60,24 @@ function assertSafe(src: string): void {
   }
 }
 
+/**
+ * `meta` exportado por el modelo: cada campo inválido (no numérico o fuera de
+ * rango) cae al valor pedido por el usuario. Antes un meta inválido abortaba el
+ * reintento aunque el valor fuera a descartarse igualmente (la proporción
+ * elegida manda en `runVidramming`).
+ */
 function normalizeMeta(raw: unknown, fallback: CompositionMeta): CompositionMeta {
   const m = (raw ?? {}) as Partial<CompositionMeta>;
-  const width = Number(m.width ?? fallback.width);
-  const height = Number(m.height ?? fallback.height);
-  const fps = Number(m.fps ?? fallback.fps);
-  const durationInFrames = Number(m.durationInFrames ?? fallback.durationInFrames);
-
-  if (!Number.isFinite(width) || width < 16 || width > 4096) {
-    throw new Error(`meta.width inválido: ${String(m.width)}`);
-  }
-  if (!Number.isFinite(height) || height < 16 || height > 4096) {
-    throw new Error(`meta.height inválido: ${String(m.height)}`);
-  }
-  if (!Number.isFinite(fps) || fps < 1 || fps > 120) {
-    throw new Error(`meta.fps inválido: ${String(m.fps)}`);
-  }
-  if (!Number.isFinite(durationInFrames) || durationInFrames < 1 || durationInFrames > 60 * 120 * 30) {
-    throw new Error(`meta.durationInFrames inválido: ${String(m.durationInFrames)}`);
-  }
-
+  const field = (value: unknown, min: number, max: number, fb: number): number => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < min || n > max) return fb;
+    return Math.round(n);
+  };
   return {
-    width: Math.round(width),
-    height: Math.round(height),
-    fps: Math.round(fps),
-    durationInFrames: Math.round(durationInFrames),
+    width: field(m.width, 16, 4096, fallback.width),
+    height: field(m.height, 16, 4096, fallback.height),
+    fps: field(m.fps, 1, 120, fallback.fps),
+    durationInFrames: field(m.durationInFrames, 1, 60 * 120 * 30, fallback.durationInFrames),
   };
 }
 
@@ -117,7 +113,9 @@ export function compileComposition(raw: string, fallbackMeta: CompositionMeta): 
       filePath: 'composition.tsx',
     }).code;
   } catch (e) {
-    throw new Error(`Error de transpilación: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`Error de transpilación: ${e instanceof Error ? e.message : String(e)}`, {
+      cause: e,
+    });
   }
 
   const module = { exports: {} as Record<string, unknown> };
@@ -139,7 +137,9 @@ export function compileComposition(raw: string, fallbackMeta: CompositionMeta): 
     );
     fn(require, module, module.exports, React);
   } catch (e) {
-    throw new Error(`Error al ejecutar el módulo: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`Error al ejecutar el módulo: ${e instanceof Error ? e.message : String(e)}`, {
+      cause: e,
+    });
   }
 
   const exported = module.exports as { default?: unknown; meta?: unknown };

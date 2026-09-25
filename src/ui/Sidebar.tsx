@@ -1,15 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { useAppController } from '../state/useAppController';
 import { fileToAsset } from '../features/assets/assetsStore';
 import { Button } from '../shared/ui/Button';
 import { Field } from '../shared/ui/Field';
-import { Modal } from '../shared/ui/Modal';
 import { ErrorBox } from '../shared/ui/ErrorBox';
-import { setKey, loadKeys, hasKey } from '../features/providers/keys';
+import { hasKey } from '../features/providers/keys';
 import { testConnection } from '../features/providers/chat';
-import { modelsForProvider, refreshModelCatalog } from '../features/providers/modelCatalog';
-import { PROVIDERS } from '../features/providers/definitions';
+import { SOURCE_LABEL } from '../features/providers/modelCatalog';
+import { useModelCatalog } from '../features/providers/useModelCatalog';
 import { ASPECT_RATIOS } from '../shared/types';
+import { ConnectModal } from './ConnectModal';
 
 type Ctrl = ReturnType<typeof useAppController>;
 
@@ -20,12 +20,12 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
     prefs,
     setPrefs,
     setAspect,
-    provider,
     providers,
     phase,
     error,
     status,
     vidramming,
+    cancelVidramming,
     prompt,
     setPrompt,
     assets,
@@ -36,35 +36,39 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
     refreshHistory,
     loadRecord,
     removeRecord,
-    refreshModels,
+    exporting,
   } = ctrl;
 
-  const [showKeys, setShowKeys] = useState(false);
+  const [showConnect, setShowConnect] = useState(false);
   const [assetError, setAssetError] = useState('');
   const [connState, setConnState] = useState<{ ok: boolean; message: string } | null>(null);
   const [testing, setTesting] = useState(false);
-  const [keyVersion, setKeyVersion] = useState(0);
+  const [keyToken, setKeyToken] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const busy = phase === 'generating';
-  const { models, source } = modelsForProvider(provider);
+  /** Nada que cambie composición/dimensión puede moverse mientras se genera o exporta. */
+  const locked = busy || exporting;
+  const catalog = useModelCatalog(prefs.providerId, keyToken);
   const keyReady = hasKey(prefs.providerId);
 
-  useEffect(() => {
-    void refreshHistory();
-  }, [refreshHistory]);
-
-  useEffect(() => {
-    if (prefs.model && !models.some((m) => m.id === prefs.model)) {
-      const stillValid = provider.models.some((m) => m.id === prefs.model);
-      if (!stillValid) setPrefs({ model: provider.defaultModel });
+  /** El modelo elegido se conserva aunque no esté en el catálogo (p.ej. cache vencida). */
+  const modelOptions = useMemo(() => {
+    if (prefs.model && !catalog.models.some((m) => m.id === prefs.model)) {
+      return [...catalog.models, { id: prefs.model, label: `${prefs.model} (elegido)` }];
     }
-    void refreshModelCatalog(prefs.providerId).then(() => {
-      // force re-render after catalog refresh
-      setKeyVersion((v) => v + 1);
-    });
-    setConnState(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prefs.providerId]);
+    return catalog.models;
+  }, [catalog.models, prefs.model]);
+
+  const catalogLine =
+    catalog.status === 'loading'
+      ? '⟳ Actualizando catálogo…'
+      : catalog.error
+        ? `⚠ ${catalog.error}`
+        : catalog.source === 'api'
+          ? `✓ ${catalog.models.length} modelos · ${SOURCE_LABEL.api}`
+          : catalog.source === 'registry'
+            ? `◇ ${catalog.models.length} modelos · ${SOURCE_LABEL.registry} (sin key o /models no disponible)`
+            : `○ ${catalog.models.length} modelos · ${SOURCE_LABEL.default}`;
 
   const onFiles = async (fileList: FileList | null) => {
     if (!fileList?.length) return;
@@ -86,10 +90,7 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
     try {
       const result = await testConnection(prefs.providerId);
       setConnState(result);
-      if (result.ok) {
-        setKeyVersion((v) => v + 1);
-        void refreshModels();
-      }
+      if (result.ok) setKeyToken((v) => v + 1);
     } finally {
       setTesting(false);
     }
@@ -119,7 +120,7 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
             rows={5}
             placeholder='Ej: Título "Open VG" con rebote, fondo degradado azul profundo y partículas sutiles…'
             className="input resize-y"
-            disabled={busy}
+            disabled={locked}
           />
         </Field>
       </div>
@@ -130,7 +131,7 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
             value={prefs.aspect}
             onChange={(e) => setAspect(e.target.value as typeof prefs.aspect)}
             className="input"
-            disabled={busy}
+            disabled={locked}
           >
             {ASPECT_RATIOS.map((a) => (
               <option key={a.id} value={a.id}>
@@ -145,7 +146,7 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
             value={prefs.durationSec}
             onChange={(e) => setPrefs({ durationSec: Number(e.target.value) })}
             className="input"
-            disabled={busy}
+            disabled={locked}
           >
             {DURATIONS.map((d) => (
               <option key={d} value={d}>
@@ -163,11 +164,12 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
           <select
             value={prefs.providerId}
             onChange={(e) => {
+              setConnState(null);
               const p = providers.find((x) => x.id === e.target.value);
               setPrefs({ providerId: e.target.value, model: p?.defaultModel ?? prefs.model });
             }}
             className="input"
-            disabled={busy}
+            disabled={locked}
           >
             {providers.map((p) => (
               <option key={p.id} value={p.id}>
@@ -178,17 +180,15 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
           </select>
         </Field>
 
-        <Field
-          label={`Modelo${source === 'api' ? ' · catálogo automático' : ' · lista local'}`}
-        >
-          <div className="flex gap-2" key={`m-${prefs.providerId}-${keyVersion}`}>
+        <Field label={`Modelo · ${SOURCE_LABEL[catalog.source]}`}>
+          <div className="flex gap-2">
             <select
               value={prefs.model}
               onChange={(e) => setPrefs({ model: e.target.value })}
               className="input flex-1"
-              disabled={busy}
+              disabled={locked}
             >
-              {models.map((m) => (
+              {modelOptions.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.label}
                 </option>
@@ -197,13 +197,30 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
             <Button
               variant="glass"
               size="sm"
-              onClick={() => void refreshModels().then(() => setKeyVersion((v) => v + 1))}
+              onClick={() => void catalog.refresh()}
               title="Actualizar modelos desde la API"
-              disabled={busy}
+              disabled={locked || catalog.loading}
             >
-              ↻
+              {catalog.loading ? '…' : '↻'}
             </Button>
           </div>
+          <p
+            className={`mt-1.5 text-[11px] leading-snug ${
+              catalog.error ? 'text-amber-700' : 'text-ink-400'
+            }`}
+            aria-live="polite"
+          >
+            {catalogLine}
+            {catalog.error && (
+              <button
+                type="button"
+                className="btn-ghost ml-1 px-1 py-0 text-[11px] text-vg-600 underline"
+                onClick={() => void catalog.refresh()}
+              >
+                Reintentar
+              </button>
+            )}
+          </p>
         </Field>
 
         <div className="flex items-center gap-2">
@@ -211,7 +228,7 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
             variant="glass"
             size="sm"
             onClick={() => void onTest()}
-            disabled={busy || testing}
+            disabled={locked || testing}
             className="flex-1"
           >
             {testing ? 'Probando…' : 'Probar conexión API'}
@@ -290,12 +307,18 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Button variant="glass" onClick={() => setShowKeys(true)}>
-          Configurar API keys…
+        <Button variant="glass" onClick={() => setShowConnect(true)}>
+          Conectar proveedor…
         </Button>
-        <Button variant="primary" onClick={() => void vidramming()} disabled={busy}>
-          {busy ? 'VIDRAMMING…' : 'VIDRAMMING'}
-        </Button>
+        {busy ? (
+          <Button variant="glass" onClick={cancelVidramming}>
+            CANCELAR GENERACIÓN
+          </Button>
+        ) : (
+          <Button variant="primary" onClick={() => void vidramming()} disabled={locked}>
+            VIDRAMMING
+          </Button>
+        )}
       </div>
 
       {status && !error && (
@@ -310,15 +333,15 @@ export function Sidebar({ ctrl }: { ctrl: Ctrl }) {
         onLoad={loadRecord}
         onRemove={removeRecord}
         onRefresh={refreshHistory}
+        disabled={locked}
       />
 
-      {showKeys && (
-        <KeysModal
-          onClose={() => {
-            setShowKeys(false);
-            setKeyVersion((v) => v + 1);
-          }}
-          onChanged={() => setKeyVersion((v) => v + 1)}
+      {showConnect && (
+        <ConnectModal
+          prefs={prefs}
+          setPrefs={setPrefs}
+          onClose={() => setShowConnect(false)}
+          onKeysChanged={() => setKeyToken((v) => v + 1)}
         />
       )}
     </aside>
@@ -330,17 +353,25 @@ function HistorySection({
   onLoad,
   onRemove,
   onRefresh,
+  disabled,
 }: {
   history: Ctrl['history'];
   onLoad: Ctrl['loadRecord'];
   onRemove: (id: string) => Promise<void>;
   onRefresh: () => Promise<void>;
+  /** true mientras se genera o se exporta: cargar/borrar pisaría el estado activo. */
+  disabled: boolean;
 }) {
   return (
     <div className="mt-1 border-t border-ink-950/8 pt-3">
       <div className="mb-2 flex items-center justify-between">
         <h3 className="field-label mb-0">Historial</h3>
-        <button type="button" onClick={() => void onRefresh()} className="btn-ghost text-xs text-vg-600">
+        <button
+          type="button"
+          onClick={() => void onRefresh()}
+          className="btn-ghost text-xs text-vg-600"
+          disabled={disabled}
+        >
           Actualizar
         </button>
       </div>
@@ -353,7 +384,8 @@ function HistorySection({
               <button
                 type="button"
                 onClick={() => onLoad(rec)}
-                className="block w-full text-left text-xs text-ink-800 hover:text-vg-700"
+                disabled={disabled}
+                className="block w-full text-left text-xs text-ink-800 hover:text-vg-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <span className="line-clamp-2">{rec.prompt || '(sin prompt)'}</span>
                 <span className="mt-1 block text-[11px] text-ink-400">
@@ -364,7 +396,8 @@ function HistorySection({
               <button
                 type="button"
                 onClick={() => void onRemove(rec.id)}
-                className="btn-ghost mt-0.5 text-[11px] text-red-500"
+                disabled={disabled}
+                className="btn-ghost mt-0.5 text-[11px] text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Eliminar
               </button>
@@ -376,84 +409,3 @@ function HistorySection({
   );
 }
 
-function KeysModal({
-  onClose,
-  onChanged,
-}: {
-  onClose: () => void;
-  onChanged?: () => void;
-}) {
-  const [keys, setKeys] = useState(() => loadKeys());
-  const [savedFlash, setSavedFlash] = useState(false);
-
-  const updateKey = (id: string, value: string) => {
-    setKeys((prev) => ({ ...prev, [id]: value }));
-    setKey(id, value);
-    onChanged?.();
-    setSavedFlash(true);
-    window.setTimeout(() => setSavedFlash(false), 600);
-  };
-
-  return (
-    <Modal title="API keys" onClose={onClose}>
-      <p className="mb-4 text-xs text-ink-500">
-        Se guardan <strong>al escribir</strong> en este navegador (localStorage). Las llamadas salen
-        por el proxy local de Vite (<code>/api/llm/:provider</code>).
-      </p>
-      <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
-        {PROVIDERS.map((p) => (
-          <span
-            key={p.id}
-            className={`rounded-full px-2 py-0.5 font-medium ${
-              (keys[p.id] ?? '').trim()
-                ? 'bg-emerald-50 text-emerald-700'
-                : 'bg-ink-950/5 text-ink-400'
-            }`}
-          >
-            {p.label}
-            {(keys[p.id] ?? '').trim() ? ' ✓' : ''}
-          </span>
-        ))}
-      </div>
-      <div className="space-y-3">
-        {PROVIDERS.map((p) => (
-          <label key={p.id} className="block">
-            <span className="field-label">
-              {p.label}
-              <span className="ml-2 font-normal normal-case tracking-normal text-ink-400">
-                {p.keyHint}
-              </span>
-            </span>
-            <input
-              type="password"
-              value={keys[p.id] ?? ''}
-              onChange={(e) => updateKey(p.id, e.target.value)}
-              placeholder="API key"
-              className="input font-mono"
-              autoComplete="off"
-              spellCheck={false}
-            />
-            {p.website && (
-              <a
-                href={p.website}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="mt-1 inline-block text-[11px] text-vg-600 underline-offset-2 hover:underline"
-              >
-                Obtener key en {new URL(p.website).hostname} ↗
-              </a>
-            )}
-          </label>
-        ))}
-      </div>
-      <div className="mt-5 flex items-center justify-between gap-3">
-        <span className={`text-xs transition-opacity ${savedFlash ? 'text-emerald-600 opacity-100' : 'opacity-0'}`}>
-          Guardado ✓
-        </span>
-        <Button variant="primary" onClick={onClose}>
-          Cerrar
-        </Button>
-      </div>
-    </Modal>
-  );
-}
